@@ -290,7 +290,7 @@ footer.page{color:var(--muted);font-size:12px;text-align:center;margin-top:22px;
       <div class="subtitle">传一张英文图片：自动识别 · 翻译 · 按你的水平标生词 · 讲语法</div>
       <div class="top-actions">
         <button class="btn" id="btnVocab">我的生词本 <span id="vocabCount" class="n" style="background:#ffe3ec;color:#c2255c;border-radius:10px;padding:0 6px;font-size:11px">0</span></button>
-        <button class="btn" id="btnSettings">AI 设置</button>
+        <button class="btn" id="btnSettings">设置</button>
         <button class="btn" id="btnDemo">演示</button>
       </div>
     </div>
@@ -336,8 +336,17 @@ footer.page{color:var(--muted);font-size:12px;text-align:center;margin-top:22px;
 <!-- settings modal -->
 <div class="modal-mask" id="settingsMask">
   <div class="modal">
-    <h3>AI 接口设置（第一次使用需要配置一次）</h3>
+    <h3>设置</h3>
     <div class="frow">
+      <label>工作模式</label>
+      <select id="setMode">
+        <option value="free">免 Key 内置模式（推荐 · 不用注册不花钱）</option>
+        <option value="ai">AI 模式（自己填 Key · 多语法讲解，效果更好）</option>
+      </select>
+      <div class="hint" id="modeHint"></div>
+    </div>
+    <div id="aiFields">
+      <div class="frow">
       <label>服务商</label>
       <select id="setProvider"></select>
       <div class="hint" id="providerHint"></div>
@@ -355,6 +364,7 @@ footer.page{color:var(--muted);font-size:12px;text-align:center;margin-top:22px;
     <div class="frow">
       <label>接口地址（一般不用改）</label>
       <input type="text" id="setBase">
+    </div>
     </div>
     <div class="test-line" id="testLine"></div>
     <div class="foot">
@@ -428,7 +438,7 @@ var PRESETS = [
 ];
 
 var state = {
-  settings: { provider:'zhipu', baseUrl:PRESETS[0].baseUrl, model:PRESETS[0].model, apiKey:'', level:4, showSame:false },
+  settings: { mode:'free', provider:'zhipu', baseUrl:PRESETS[0].baseUrl, model:PRESETS[0].model, apiKey:'', level:4, showSame:false },
   starred: {},   // word -> {w,r,p,t,addedAt,src}
   history: [],   // [{id,ts,thumb,title,difficulty,result}]
   results: [],   // in-memory rendered results (incl. dataUrl for re-analyze)
@@ -509,11 +519,13 @@ function initSettings(){
   PRESETS.forEach(function(p){
     var o=document.createElement('option'); o.value=p.id; o.textContent=p.name; sel.appendChild(o);
   });
+  $('setMode').value=state.settings.mode||'free';
   sel.value=state.settings.provider;
   $('setKey').value=state.settings.apiKey||'';
   $('setModel').value=state.settings.model||'';
   $('setBase').value=state.settings.baseUrl||'';
-  syncProviderHint();
+  syncProviderHint(); syncModeHint();
+  $('setMode').onchange=syncModeHint;
   sel.onchange=function(){
     var p=PRESETS.find(function(x){return x.id===sel.value;});
     if(p){ $('setBase').value=p.baseUrl; $('setModel').value=p.model; }
@@ -523,6 +535,7 @@ function initSettings(){
   $('btnCancelSet').onclick=function(){ $('settingsMask').classList.remove('show'); };
   $('settingsMask').onclick=function(e){ if(e.target===this) this.classList.remove('show'); };
   $('btnSaveSet').onclick=function(){
+    state.settings.mode=$('setMode').value;
     state.settings.provider=sel.value;
     state.settings.apiKey=$('setKey').value.trim();
     state.settings.model=$('setModel').value.trim();
@@ -533,6 +546,14 @@ function initSettings(){
   };
   $('btnTest').onclick=testConnection;
 }
+function syncModeHint(){
+  var free=$('setMode').value==='free';
+  $('aiFields').style.display=free?'none':'';
+  $('modeHint').innerHTML=free
+    ? '内置本地 OCR 识别（Tesseract）+ 免费在线翻译（谷歌，连不上自动切 MyMemory 备用）+ 本地 8 级词库标注生词。<b>无需注册、无需 Key、不消耗任何额度</b>；免费翻译接口在大量使用时可能限流，届时可换 AI 模式。'
+    : '识别更准，并额外提供语法结构讲解和背景知识。需要自己的 API Key（智谱有免费视觉模型，注册即送）。';
+}
+function isAIMode(){ return (state.settings.mode||'free')==='ai'; }
 function syncProviderHint(){
   var p=PRESETS.find(function(x){return x.id===$('setProvider').value;})||PRESETS[0];
   $('providerHint').innerHTML = p.hint + (p.keyUrl? ' <a href="'+esc(p.keyUrl)+'" target="_blank">去获取 Key ↗</a>' : '');
@@ -698,9 +719,10 @@ function processQueue(){
   for(var i=0;i<queueItems.length;i++){ if(queueItems[i].status==='wait'){ it=queueItems[i]; break; } }
   if(!it) return;
   state.queueBusy=true;
-  if(!state.settings.apiKey || !state.settings.baseUrl || !state.settings.model){
+  var useAI=isAIMode();
+  if(useAI && (!state.settings.apiKey || !state.settings.baseUrl || !state.settings.model)){
     setQStatus(it,'error','未配置 AI');
-    makeErrorCard(it,'还没有配置 AI 接口：点右上角「AI 设置」，推荐用智谱的免费视觉模型（一次注册即可）。');
+    makeErrorCard(it,'AI 模式需要先配置 Key：点右上角「设置」填入（智谱有免费模型）。不想注册的话，在设置里切换到「免 Key 内置模式」即可直接使用。');
     it.el.remove(); finish();
     return;
   }
@@ -708,8 +730,15 @@ function processQueue(){
   var job;
   if(it.kind==='text'){
     setQStatus(it,'running','分析中…');
-    job=analyzeText(it.text).then(function(result){
-      result.text=it.text;
+    job=(useAI
+      ? analyzeText(it.text).catch(function(e){
+          return freeAnalyze(it.text).then(function(r){
+            r.notes='AI 调用失败（'+String(e.message).slice(0,80)+'），已自动改用内置免费模式完成翻译与标注。'; return r;
+          });
+        })
+      : freeAnalyze(it.text)
+    ).then(function(result){
+      result.text=result.text||it.text;
       normalizeResult(result);
       addResult(result,null,null,it.title,it.badge);
     });
@@ -726,7 +755,21 @@ function processQueue(){
           return compressImage(it.file,300,0.6);
         }).then(function(th){ it.thumb=th.dataUrl; });
       })
-      .then(function(){ return analyzeImage(it.dataUrl); })
+      .then(function(){
+        if(useAI){
+          return analyzeImage(it.dataUrl).catch(function(e){
+            return ocrFallback(it.dataUrl,e);
+          });
+        }
+        setQStatus(it,'running','OCR 识别中…');
+        return ocrImage(it.dataUrl).then(function(text){
+          if(!text || text.replace(/\s/g,'').length<10){
+            throw new Error('没能从图片里识别出英文（图片可能太模糊或艺术字体），试试更清晰的图，或在设置里开 AI 模式');
+          }
+          setQStatus(it,'running','翻译中…');
+          return freeAnalyze(text);
+        });
+      })
       .then(function(result){
         addResult(result,it.thumb,it.dataUrl,it.title,it.badge);
       });
@@ -742,6 +785,101 @@ function processQueue(){
     })
     .then(finish);
   function finish(){ state.queueBusy=false; processQueue(); }
+}
+
+/* ---------------- 免 Key 内置管线 ---------------- */
+var _tessPromise=null;
+function loadTesseract(){
+  if(_tessPromise) return _tessPromise;
+  _tessPromise=new Promise(function(resolve,reject){
+    var s=document.createElement('script');
+    s.src='vendor/tesseract/tesseract.min.js';
+    s.onload=resolve;
+    s.onerror=function(){ _tessPromise=null; reject(new Error('OCR 组件加载失败（用 file:// 双击打开时浏览器会拦截本地组件，请用「启动.bat」或在线网址打开）')); };
+    document.head.appendChild(s);
+  }).then(function(){
+    // 用绝对路径 + 关闭 blob 包装，否则 worker 内相对路径会失效
+    var base=location.href.replace(/[^\/]*$/,'');
+    return Tesseract.createWorker('eng',1,{
+      workerPath:base+'vendor/tesseract/worker.min.js',
+      corePath:base+'vendor/tesseract/',
+      langPath:base+'vendor/tesseract/',
+      workerBlobURL:false
+    });
+  });
+  return _tessPromise;
+}
+function ocrImage(dataUrl){
+  return loadTesseract().then(function(worker){
+    return worker.recognize(dataUrl).then(function(res){
+      return ((res.data&&res.data.text)||'').replace(/[ \t]+\n/g,'\n').trim();
+    });
+  });
+}
+function ocrFallback(dataUrl,aiErr){
+  return ocrImage(dataUrl).then(function(text){
+    if(!text || text.replace(/\s/g,'').length<10) throw aiErr;
+    return freeAnalyze(text).then(function(r){
+      r.notes='AI 识别失败（'+String(aiErr.message).slice(0,80)+'），已自动改用本地 OCR + 免费翻译。'+r.notes;
+      return r;
+    });
+  });
+}
+/* 谷歌免费接口（gtx） */
+function gtTranslate(text){
+  return fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q='+encodeURIComponent(text))
+    .then(function(r){ if(!r.ok) throw new Error('谷歌接口 '+r.status); return r.json(); })
+    .then(function(j){
+      var segs=(j&&j[0])||[]; var out='';
+      segs.forEach(function(s){ if(s&&s[0]) out+=s[0]; });
+      if(!out.trim()) throw new Error('谷歌接口返回为空');
+      return out;
+    });
+}
+/* MyMemory 免费接口（国内直连可用，单次500字符内） */
+function mmTranslate(text){
+  var parts=[], cur='';
+  (text.match(/[^.!?]+[.!?]+["']?\s*|[^.!?]+$/g)||[text]).forEach(function(s){
+    if((cur+s).length>420){ if(cur.trim()) parts.push(cur.trim()); cur=s; }
+    else cur+=s;
+  });
+  if(cur.trim()) parts.push(cur.trim());
+  var chain=Promise.resolve(), outs=[];
+  parts.forEach(function(p){
+    chain=chain.then(function(){
+      return fetch('https://api.mymemory.translated.net/get?q='+encodeURIComponent(p)+'&langpair=en|zh-CN&de=english-reader%40users.noreply.github.com')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var t=j&&j.responseData&&j.responseData.translatedText;
+          if(!t || /MYMEMORY WARNING/i.test(t)) throw new Error('MyMemory 限流');
+          outs.push(t);
+        });
+    });
+  });
+  return chain.then(function(){ return outs.join('\n'); });
+}
+function translateText(text){
+  return gtTranslate(text).catch(function(){ return mmTranslate(text); });
+}
+function freeAnalyze(text){
+  var paras=String(text).split(/\n{2,}/).map(function(s){return s.trim();}).filter(Boolean);
+  var outs=[];
+  var chain=Promise.resolve();
+  paras.forEach(function(p){
+    chain=chain.then(function(){
+      return translateText(p).then(function(t){ outs.push(t); });
+    });
+  });
+  return chain.then(function(){
+    return {
+      text:text,
+      translation:outs.join('\n\n'),
+      difficulty:'免 Key 内置模式',
+      phrases:[], grammar:[],
+      notes:'当前为免 Key 模式：本地识别 + 免费在线翻译 + 本地 8 级词库标注生词。\n语法点讲解与更高质量的识别，可在「设置」里切换到 AI 模式（智谱有免费模型，注册即送）。',
+      freeMode:true
+    };
+  });
 }
 
 /* 长文本按段落切块 */
@@ -964,7 +1102,7 @@ function compressDataUrl(dataUrl,maxSide,quality){
 }
 function friendlyError(err){
   var m=err&&err.message||String(err);
-  if(/401|invalid.*key|Unauthorized/i.test(m)) return 'API Key 不对或已过期（错误：'+m+'）。\n请点右上角「AI 设置」检查。';
+  if(/401|invalid.*key|Unauthorized/i.test(m)) return 'API Key 不对或已过期（错误：'+m+'）。\n请点右上角「设置」检查，或切换到免 Key 内置模式。';
   if(/429/.test(m)) return '调用太频繁或额度不足（429），稍等一会再试。';
   if(/Failed to fetch|NetworkError|load failed/i.test(m)) return '网络连不上 AI 接口：'+m+'\n① 检查网络 ② 关掉代理试试 ③ 或用文件夹里的「启动.bat」重新打开本页。';
   return m;
@@ -973,7 +1111,7 @@ function friendlyError(err){
 /* ---------------- 调用 AI ---------------- */
 function buildPrompt(){
   var lv=LEVELS[state.settings.level];
-  return '你是一名专业、接地气的英语精读老师。用户给你一张含英文的图片。请识别并讲解，严格只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字）：\n'+
+  return '你是一名专业、接地气的英语精读老师。用户给你一张含英文的图片。请识别并讲解，严格只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字、不要换行美化，输出单行紧凑 JSON）：\n'+
   '{"text":"图片中全部英文原文，保留段落换行，逐词准确识别，不要增删改写，标点保留",\n'+
   ' "translation":"全文自然流畅的中文翻译，段落数量与划分必须与 text 完全一致",\n'+
   ' "difficulty":"整体难度判断，如：约高中～四级难度",\n'+
@@ -987,8 +1125,9 @@ function buildPrompt(){
   '4. 用户当前身份：'+lv.name+'考生，按这个水平决定讲解深浅；\n'+
   '5. 如果图片里没有英文文本，只输出 {"error":"未识别到英文文本，请换一张含英文的图片"}。';
 }
-function callAI(body){
+function callAI(body, retried){
   var s=state.settings;
+  if(body.max_tokens===undefined && !retried) body.max_tokens=4096;   // 降低长文被截断概率
   var ctrl=new AbortController();
   var timer=setTimeout(function(){ ctrl.abort(); },180000);
   return fetch(s.baseUrl+'/chat/completions',{
@@ -999,7 +1138,13 @@ function callAI(body){
   }).then(function(r){
     clearTimeout(timer);
     return r.text().then(function(t){
-      if(!r.ok) throw new Error(r.status+' '+t.slice(0,300));
+      if(!r.ok){
+        if(!retried && r.status===400 && /max_tokens/i.test(t)){
+          delete body.max_tokens;
+          return callAI(body,true);
+        }
+        throw new Error(r.status+' '+t.slice(0,300));
+      }
       var j; try{ j=JSON.parse(t); }catch(e){ throw new Error('接口返回的不是 JSON：'+t.slice(0,200)); }
       var content=(j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||'';
       if(typeof content!=='string'){ content=JSON.stringify(content); }
@@ -1025,13 +1170,22 @@ function analyzeImage(dataUrl){
   };
   return callAI(body).then(function(obj){
     if(obj.error) throw new Error(String(obj.error));
+    if(obj.__salvaged){
+      var t=String(obj.text||'');
+      if(t.replace(/\s/g,'').length<10) throw new Error('AI 返回内容不完整且无法恢复');
+      return freeAnalyze(t).then(function(r){
+        r.difficulty='AI 识别成功（讲解输出被截断，已用内置翻译兜底）';
+        r.notes='AI 已识别出原文，但讲解 JSON 输出中断，本卡片的翻译由内置免费翻译完成。可点「重新分析」再试一次。';
+        return r;
+      });
+    }
     normalizeResult(obj);
     return obj;
   });
 }
 function buildTextPrompt(){
   var lv=LEVELS[state.settings.level];
-  return '你是一名专业、接地气的英语精读老师。下面给你一段从文档中提取出的英文原文，请讲解。严格只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字）：\n'+
+  return '你是一名专业、接地气的英语精读老师。下面给你一段从文档中提取出的英文原文，请讲解。严格只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字、不要换行美化，输出单行紧凑 JSON）：\n'+
   '{"translation":"全文自然流畅的中文翻译，段落数量与划分必须与原文完全一致",\n'+
   ' "difficulty":"整体难度判断，如：约高中～四级难度",\n'+
   ' "phrases":[{"phrase":"原文中出现的短语或固定搭配（原样摘录）","meaning":"该语境下的中文意思"}],\n'+
@@ -1049,6 +1203,7 @@ function analyzeText(text){
   };
   return callAI(body).then(function(obj){
     if(obj.error) throw new Error(String(obj.error));
+    if(obj.__salvaged) throw new Error('AI 讲解输出被截断');
     if(!obj.translation && !obj.phrases && !obj.grammar){
       throw new Error('AI 没有返回有效讲解，请重试一次');
     }
@@ -1058,18 +1213,77 @@ function analyzeText(text){
 function extractJSON(s){
   if(!s) return null;
   s=s.replace(/```json|```/gi,'').trim();
-  var a=s.indexOf('{'), b=s.lastIndexOf('}');
-  if(a<0||b<=a) return null;
-  s=s.slice(a,b+1);
-  try{ return JSON.parse(s); }catch(e){}
-  try{ return JSON.parse(s.replace(/,\s*([}\]])/g,'$1')); }catch(e){}
+  var a=s.indexOf('{');
+  if(a<0) return null;
+  var b=s.lastIndexOf('}');
+  var body=(b>a)? s.slice(a,b+1) : s.slice(a);   // b<=a 说明被截断
+  var r=tryParseJSON(body);
+  if(r) return r;
+  r=tryParseJSON(closeTruncatedJson(body));
+  if(r) return r;
+  var salvaged=salvageTextField(s);               // 最后兜底：至少抠出识别文本
+  if(salvaged) return {__salvaged:true, text:salvaged};
   return null;
+}
+function tryParseJSON(s){
+  try{ return JSON.parse(s); }catch(e){}
+  var out='',inStr=false,esc=false;
+  for(var i=0;i<s.length;i++){
+    var c=s[i];
+    if(inStr){
+      if(esc){ out+=c; esc=false; continue; }
+      if(c==='\\'){ out+=c; esc=true; continue; }
+      if(c==='"'){ inStr=false; out+=c; continue; }
+      if(c==='\n'){ out+='\\n'; continue; }      // 字符串里的裸换行转义
+      if(c==='\r'){ continue; }
+      if(c==='\t'){ out+='\\t'; continue; }
+      out+=c; continue;
+    }
+    if(c==='"') inStr=true;
+    out+=c;
+  }
+  try{ return JSON.parse(out); }catch(e){}
+  try{ return JSON.parse(out.replace(/,\s*([}\]])/g,'$1')); }catch(e){}
+  return null;
+}
+function closeTruncatedJson(s){
+  var inStr=false,esc=false,stack=[];
+  for(var i=0;i<s.length;i++){
+    var c=s[i];
+    if(inStr){
+      if(esc){ esc=false; continue; }
+      if(c==='\\'){ esc=true; continue; }
+      if(c==='"'){ inStr=false; continue; }
+      continue;
+    }
+    if(c==='"'){ inStr=true; continue; }
+    if(c==='{'||c==='[') stack.push(c);
+    else if(c==='}'||c===']') stack.pop();
+  }
+  var tail='';
+  if(esc||inStr) tail+='"';
+  s=s.replace(/,\s*$/,'');
+  if(/:\s*$/.test(s)) tail+='""';                // key 后面还没值
+  for(var k=stack.length-1;k>=0;k--) tail+= stack[k]==='{'?'}':']';
+  return s+tail;
+}
+function salvageTextField(s){
+  var m=/"text"\s*:\s*"/.exec(s);
+  if(!m) return null;
+  var raw=s.slice(m.index+m[0].length);
+  var cut=raw.search(/",\s*"(translation|difficulty|phrases|grammar|notes)"/);
+  if(cut>=0) raw=raw.slice(0,cut);
+  raw=raw.replace(/\\u([0-9a-fA-F]{4})/g,function(_,h){ return String.fromCharCode(parseInt(h,16)); })
+         .replace(/\\n/g,'\n').replace(/\\t/g,' ').replace(/\\"/g,'"').replace(/\\\\/g,'\\');
+  raw=raw.replace(/\\"\s*$/,'');
+  return raw.trim()||null;
 }
 function normalizeResult(r){
   r.text=String(r.text||'').replace(/\r/g,'');
   r.translation=String(r.translation||'');
   r.difficulty=String(r.difficulty||'');
   r.notes=String(r.notes||'');
+  r.freeMode=r.freeMode===true;
   r.phrases=Array.isArray(r.phrases)?r.phrases.slice(0,15):[];
   r.phrases=r.phrases.filter(function(p){return p&&p.phrase;});
   r.grammar=Array.isArray(r.grammar)?r.grammar.slice(0,10):[];
@@ -1152,6 +1366,7 @@ function renderResult(rec, toTop){
   rec.scan=scan;
 
   var diffBadge=rec.result.difficulty?('<span class="badge">'+esc(rec.result.difficulty)+'</span>'):'';
+  if(rec.result.freeMode) diffBadge+='<span class="badge" style="color:#0ca678;border-color:#96f2d7;background:#e6fcf5">免 Key 模式</span>';
   var meta=document.createElement('div'); meta.className='r-head';
   meta.innerHTML=
     (rec.thumb?'<img src="'+rec.thumb+'" alt="缩略图">':'<div class="ftype-badge">'+esc(rec.badge||'文本')+'</div>')+
@@ -1727,7 +1942,7 @@ function boot(){
     renderResult(rec,true);
   }
   if(!state.settings.apiKey){
-    setTimeout(function(){ toast('首次使用：点右上角「AI 设置」配置免费接口（一次即可）'); },600);
+    setTimeout(function(){ toast('默认免 Key 模式，直接拖入图片或文档即可；右上角「设置」可开启 AI 增强'); },600);
   }
 }
 boot();
