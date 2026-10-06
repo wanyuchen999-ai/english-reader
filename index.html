@@ -763,8 +763,8 @@ function processQueue(){
         }
         setQStatus(it,'running','OCR 识别中…');
         return ocrImage(it.dataUrl).then(function(text){
-          if(!text || text.replace(/\s/g,'').length<10){
-            throw new Error('没能从图片里识别出英文（图片可能太模糊或艺术字体），试试更清晰的图，或在设置里开 AI 模式');
+          if(!text || !ocrLooksValid(text)){
+            throw new Error('本地 OCR 没能从这张图认出像样的英文（深色背景、艺术字、表情混排或图片太糊都会导致）。\n建议：① 点右上角「设置」切到 AI 模式，识别能力强很多；② 或截一张更清晰的、浅底深字的图。');
           }
           setQStatus(it,'running','翻译中…');
           return freeAnalyze(text);
@@ -809,16 +809,91 @@ function loadTesseract(){
   });
   return _tessPromise;
 }
+/* OCR 前的图像预处理：灰度化、深色背景自动反相、小图放大、对比度拉伸 */
+function preprocessOCR(dataUrl){
+  return new Promise(function(resolve){
+    var img=new Image();
+    img.onload=function(){
+      try{
+        var w=img.naturalWidth,h=img.naturalHeight;
+        var s=Math.min(2.2,Math.max(1,1600/Math.max(w,h)));   // 小图放大到 1600px 级别
+        var cv=document.createElement('canvas');
+        cv.width=Math.round(w*s); cv.height=Math.round(h*s);
+        var ctx=cv.getContext('2d');
+        ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
+        ctx.drawImage(img,0,0,cv.width,cv.height);
+        var im=ctx.getImageData(0,0,cv.width,cv.height);
+        var d=im.data, n=d.length/4;
+        var sum=0, hist=new Array(256); for(var z=0;z<256;z++) hist[z]=0;
+        for(var i=0;i<d.length;i+=4){
+          var g=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114)|0;
+          d[i]=d[i+1]=d[i+2]=g; hist[g]++; sum+=g;
+        }
+        var mean=sum/n;
+        var dark=mean<115;                                    // 整体偏暗 → 深色背景，需反相
+        var lo=256,hi=0,cnt=0;
+        for(var a=0;a<256;a++){ cnt+=hist[a]; if(cnt>=n*0.04){ lo=a; break; } }
+        cnt=0;
+        for(var b=255;b>=0;b--){ cnt+=hist[b]; if(cnt>=n*0.04){ hi=b; break; } }
+        if(hi-lo<30){ resolve(cv.toDataURL('image/png')); return; } // 对比度太低就别折腾了
+        var scale=235/(hi-lo);
+        for(var j=0;j<d.length;j+=4){
+          var v=d[j];
+          if(dark) v=255-v;
+          v=(v-lo)*scale; if(v<0)v=0; if(v>255)v=255;
+          d[j]=d[j+1]=d[j+2]=v;
+        }
+        ctx.putImageData(im,0,0);
+        resolve(cv.toDataURL('image/png'));
+      }catch(e){ resolve(dataUrl); }
+    };
+    img.onerror=function(){ resolve(dataUrl); };
+    img.src=dataUrl;
+  });
+}
+function otsu(hist,total){ /* 保留备用 */
+  var sum=0; for(var i=0;i<256;i++) sum+=i*hist[i];
+  var sumB=0,wB=0,maxVar=0,thr=127;
+  for(var t2=0;t2<256;t2++){
+    wB+=hist[t2]; if(!wB) continue;
+    var wF=total-wB; if(!wF) break;
+    sumB+=t2*hist[t2];
+    var mB=sumB/wB, mF=(sum-sumB)/wF;
+    var v=wB*wF*(mB-mF)*(mB-mF);
+    if(v>maxVar){ maxVar=v; thr=t2; }
+  }
+  return thr;
+}
 function ocrImage(dataUrl){
-  return loadTesseract().then(function(worker){
-    return worker.recognize(dataUrl).then(function(res){
-      return ((res.data&&res.data.text)||'').replace(/[ \t]+\n/g,'\n').trim();
+  return preprocessOCR(dataUrl).then(function(prepared){
+    return loadTesseract().then(function(worker){
+      return worker.setParameters({
+        tessedit_pageseg_mode:'6',            // 单一文本块：对聊天截图、整页文章都比自动版式稳
+        preserve_interword_spaces:'1'
+      }).then(function(){ return worker.recognize(prepared); })
+        .then(function(res){
+          var text=((res.data&&res.data.text)||'').replace(/[ \t]+\n/g,'\n').trim();
+          return text.replace(/(^|\s)\|(\s|$)/g,'$1I$2');   // OCR 常把单独的 I 认成竖线
+        });
     });
   });
 }
+/* OCR 结果守门：判断识别出的是不是像样的英文（否则不进翻译，直接提示） */
+function ocrLooksValid(text){
+  var toks=text.match(/[A-Za-z]{3,}/g)||[];
+  if(toks.length<5) return false;
+  var hit=0;
+  toks.forEach(function(t){
+    t=t.toLowerCase();
+    if(lookupWord(t)){ hit++; return; }
+    var stem=t.replace(/(ing|ed|ly|es|s)$/,'');
+    if(stem.length>=2 && lookupWord(stem)) hit++;
+  });
+  return hit/toks.length>=0.22;
+}
 function ocrFallback(dataUrl,aiErr){
   return ocrImage(dataUrl).then(function(text){
-    if(!text || text.replace(/\s/g,'').length<10) throw aiErr;
+    if(!text || !ocrLooksValid(text)) throw aiErr;
     return freeAnalyze(text).then(function(r){
       r.notes='AI 识别失败（'+String(aiErr.message).slice(0,80)+'），已自动改用本地 OCR + 免费翻译。'+r.notes;
       return r;
@@ -1957,7 +2032,9 @@ window.__EIR={
     for(var i=0;i<b.length;i++)arr[i]=b.charCodeAt(i);
     handleFiles([new File([arr],name||'injected.jpg',{type:'image/jpeg'})]);
   },
-  ingestFiles:function(files){ handleFiles(files); }
+  ingestFiles:function(files){ handleFiles(files); },
+  ocr:function(dataUrl){ return ocrImage(dataUrl); },
+  ocrValid:function(t){ return ocrLooksValid(t); }
 };
 </script>
 </body>
