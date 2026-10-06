@@ -762,10 +762,7 @@ function processQueue(){
           });
         }
         setQStatus(it,'running','OCR 识别中…');
-        return ocrImage(it.dataUrl).then(function(text){
-          if(!text || !ocrLooksValid(text)){
-            throw new Error('本地 OCR 没能从这张图认出像样的英文（深色背景、艺术字、表情混排或图片太糊都会导致）。\n建议：① 点右上角「设置」切到 AI 模式，识别能力强很多；② 或截一张更清晰的、浅底深字的图。');
-          }
+        return bestOCR(it.dataUrl).then(function(text){
           setQStatus(it,'running','翻译中…');
           return freeAnalyze(text);
         });
@@ -788,26 +785,27 @@ function processQueue(){
 }
 
 /* ---------------- 免 Key 内置管线 ---------------- */
-var _tessPromise=null;
-function loadTesseract(){
-  if(_tessPromise) return _tessPromise;
-  _tessPromise=new Promise(function(resolve,reject){
+var _tessPromises={};
+function loadTesseract(lang){
+  lang=lang||'eng';
+  if(_tessPromises[lang]) return _tessPromises[lang];
+  _tessPromises[lang]=new Promise(function(resolve,reject){
     var s=document.createElement('script');
     s.src='vendor/tesseract/tesseract.min.js';
     s.onload=resolve;
-    s.onerror=function(){ _tessPromise=null; reject(new Error('OCR 组件加载失败（用 file:// 双击打开时浏览器会拦截本地组件，请用「启动.bat」或在线网址打开）')); };
+    s.onerror=function(){ _tessPromises[lang]=null; reject(new Error('OCR 组件加载失败（用 file:// 双击打开时浏览器会拦截本地组件，请用「启动.bat」或在线网址打开）')); };
     document.head.appendChild(s);
   }).then(function(){
     // 用绝对路径 + 关闭 blob 包装，否则 worker 内相对路径会失效
     var base=location.href.replace(/[^\/]*$/,'');
-    return Tesseract.createWorker('eng',1,{
+    return Tesseract.createWorker(lang,1,{
       workerPath:base+'vendor/tesseract/worker.min.js',
       corePath:base+'vendor/tesseract/',
       langPath:base+'vendor/tesseract/',
       workerBlobURL:false
     });
   });
-  return _tessPromise;
+  return _tessPromises[lang];
 }
 /* OCR 前的图像预处理：灰度化、深色背景自动反相、小图放大、对比度拉伸 */
 function preprocessOCR(dataUrl){
@@ -864,17 +862,51 @@ function otsu(hist,total){ /* 保留备用 */
   }
   return thr;
 }
-function ocrImage(dataUrl){
+function ocrImage(dataUrl,lang){
+  lang=lang||'eng';
   return preprocessOCR(dataUrl).then(function(prepared){
-    return loadTesseract().then(function(worker){
+    return loadTesseract(lang).then(function(worker){
       return worker.setParameters({
-        tessedit_pageseg_mode:'6',            // 单一文本块：对聊天截图、整页文章都比自动版式稳
+        tessedit_pageseg_mode: lang.indexOf('chi')===0?'3':'6',   // 混排图用自动版式，纯英文用单块
         preserve_interword_spaces:'1'
       }).then(function(){ return worker.recognize(prepared); })
         .then(function(res){
           var text=((res.data&&res.data.text)||'').replace(/[ \t]+\n/g,'\n').trim();
           return text.replace(/(^|\s)\|(\s|$)/g,'$1I$2');   // OCR 常把单独的 I 认成竖线
         });
+    });
+  });
+}
+function stripCJK(s){
+  return String(s).replace(/[\u4e00-\u9fff\u3000-\u303f\uff01-\uffef]+/g,' ')
+    .replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+}
+var OCR_FAIL_MSG='本地 OCR 没能从这张图认出像样的英文（中英混排、深色背景、艺术字或图片太糊都会导致）。\n建议：① 点右上角「设置」切到 AI 模式，识别能力强很多；② 或截一张更清晰、文字更大的图。';
+/* 丢掉词典命中率太低的行（大多是中文/其他语言被英文模型硬认出来的乱码） */
+function filterGarbageLines(text){
+  return text.split('\n').filter(function(line){
+    var toks=line.match(/[A-Za-z]{2,}/g)||[];
+    if(!toks.length) return false;
+    if(toks.length<=2) return true;
+    var hit=0;
+    toks.forEach(function(t){
+      t=t.toLowerCase();
+      if(lookupWord(t)){ hit++; return; }
+      var stem=t.replace(/(ing|ed|ly|es|s)$/,'');
+      if(stem.length>=2 && lookupWord(stem)) hit++;
+    });
+    return hit/toks.length>=0.34;
+  }).join('\n').replace(/\n{3,}/g,'\n\n').trim();
+}
+/* 英文模型先试，不行自动换中英混合模型 */
+function bestOCR(dataUrl){
+  return ocrImage(dataUrl,'eng').then(function(t){
+    t=filterGarbageLines(stripCJK(t));
+    if(ocrLooksValid(t)) return t;
+    return ocrImage(dataUrl,'chi_sim+eng').then(function(t2){
+      t2=filterGarbageLines(stripCJK(t2));
+      if(ocrLooksValid(t2)) return t2;
+      throw new Error(OCR_FAIL_MSG);
     });
   });
 }
@@ -892,8 +924,10 @@ function ocrLooksValid(text){
   return hit/toks.length>=0.22;
 }
 function ocrFallback(dataUrl,aiErr){
-  return ocrImage(dataUrl).then(function(text){
-    if(!text || !ocrLooksValid(text)) throw aiErr;
+  return bestOCR(dataUrl).catch(function(e){
+    if(e.message===OCR_FAIL_MSG) throw aiErr;   // OCR 也不行时，优先展示 AI 的原始错误
+    throw e;
+  }).then(function(text){
     return freeAnalyze(text).then(function(r){
       r.notes='AI 识别失败（'+String(aiErr.message).slice(0,80)+'），已自动改用本地 OCR + 免费翻译。'+r.notes;
       return r;
@@ -2033,8 +2067,9 @@ window.__EIR={
     handleFiles([new File([arr],name||'injected.jpg',{type:'image/jpeg'})]);
   },
   ingestFiles:function(files){ handleFiles(files); },
-  ocr:function(dataUrl){ return ocrImage(dataUrl); },
-  ocrValid:function(t){ return ocrLooksValid(t); }
+  ocr:function(dataUrl,lang){ return ocrImage(dataUrl,lang).then(stripCJK); },
+  ocrValid:function(t){ return ocrLooksValid(t); },
+  bestOCR:function(dataUrl){ return bestOCR(dataUrl); }
 };
 </script>
 </body>
