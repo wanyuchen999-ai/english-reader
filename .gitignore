@@ -1,0 +1,6 @@
+# 词库原始数据与构建脚本（本地用，不发布）
+_wordlists/*.zip
+_wordlists/test.zip
+
+# 开发测试文件
+dev/
